@@ -1,0 +1,19 @@
+# PyInstaller output (the built .pkg/.exe artifacts are too large for GitHub)
+build/
+dist/
+*.pkg
+*.exe
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Unrelated local project
+fitfirst.py/
