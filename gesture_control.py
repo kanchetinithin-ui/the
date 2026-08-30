@@ -21,6 +21,11 @@ import sys
 import threading
 import time
 
+# Quiet harmless TensorFlow Lite / MediaPipe startup log noise
+# (must be set before cv2/mediapipe are imported).
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("GLOG_minloglevel", "2")
+
 import cv2
 import mediapipe as mp
 import pyautogui
