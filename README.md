@@ -46,6 +46,34 @@ pyinstaller GestureControl-windows.spec
 The exe lands in `dist\GestureControl.exe`. First launch is slower while it
 unpacks; that is normal for PyInstaller one-file builds.
 
+### Troubleshooting: "gestures are not working"
+
+Gestures **send keystrokes to whatever window is active**, so first set up a
+visible test: open YouTube in the browser, click once on the video page, then
+hold an **open palm (5 fingers)** to the camera for ~1.5 s — the video should
+pause. If "nothing happens", it may simply be that the active window ignores
+the key (e.g. Space on an empty desktop does nothing visible).
+
+To see exactly what the app sees, run preview mode:
+
+```
+python gesture_control.py --preview
+```
+
+A window shows the camera feed with the hand skeleton, finger count, hold
+timer, and the name of each action as it fires (also printed in the console).
+Make sure gesture control is toggled **ON** in the tray, then check:
+
+- **"No hand detected"** — improve lighting, face the palm to the camera,
+  keep the hand about arm's length away, fingers pointing **up**.
+- **Wrong finger count** — keep the hand upright (fingers up, not sideways).
+- **Hold timer keeps resetting** — hold the pose steadier; 1.5 s is needed
+  (3 s for the 1-finger brightness gesture).
+- **Black preview window** — the camera backend is bad; the app automatically
+  tries another backend after ~5 s of black frames, just wait.
+
+Press **Q** in the preview window to close it (the app keeps running).
+
 ### Performance notes for i5 laptops
 
 - The app already uses the MediaPipe **lite** model, 640×480 capture, and

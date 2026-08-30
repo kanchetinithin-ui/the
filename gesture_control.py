@@ -123,14 +123,20 @@ def count_fingers(hand):
 # GESTURE ENGINE (CAMERA ONCE)
 # ===============================
 class GestureEngine(threading.Thread):
-    def __init__(self):
+    def __init__(self, preview=False):
         super().__init__(daemon=True)
         self.enabled = load_state()
         self.running = True
+        self.preview = preview
+        # Some Windows webcams deliver black frames on one backend but work
+        # on another; we rotate through these if that happens.
+        self._win_backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+        self._backend_i = 0
 
     def _open_camera(self):
         if IS_WINDOWS:
-            cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            backend = self._win_backends[self._backend_i % len(self._win_backends)]
+            cap = cv2.VideoCapture(0, backend)
         elif IS_MAC:
             cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
         else:
@@ -141,12 +147,33 @@ class GestureEngine(threading.Thread):
         cap.set(cv2.CAP_PROP_FPS, 30)
         return cap
 
+    def _show_preview(self, frame, hand, fingers, hold_start, now, action):
+        if hand is not None:
+            mp.solutions.drawing_utils.draw_landmarks(
+                frame, hand, mp.solutions.hands.HAND_CONNECTIONS
+            )
+            cv2.putText(frame, f"Fingers: {fingers}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            if hold_start is not None:
+                cv2.putText(frame, f"Hold: {now - hold_start:.1f}s", (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+        else:
+            cv2.putText(frame, "No hand detected", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        if action:
+            cv2.putText(frame, action, (10, 90),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2)
+        cv2.imshow("GestureControl preview (press Q to close)", frame)
+        if (cv2.waitKey(1) & 0xFF) in (ord("q"), ord("Q")):
+            self.preview = False
+            cv2.destroyAllWindows()
+
     def run(self):
         hands = mp.solutions.hands.Hands(
             max_num_hands=1,
             model_complexity=0,
-            min_detection_confidence=0.6,
-            min_tracking_confidence=0.6,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
         )
 
         HOLD_SHORT = 1.5
@@ -155,6 +182,8 @@ class GestureEngine(threading.Thread):
         PROCESS_EVERY_N = 2  # skip every other frame to save CPU
         MAX_READ_FAILS = 30  # reopen the camera after this many bad reads
 
+        DARK_FRAME_LIMIT = 75  # ~5s of black frames -> try another backend
+
         hold_start = None
         last_action = 0
         sleep_state = "WAIT_OPEN"
@@ -162,6 +191,14 @@ class GestureEngine(threading.Thread):
         frame_i = 0
         cap = None
         read_fails = 0
+        dark_frames = 0
+        fired_label = ""
+        fired_at = 0.0
+
+        def fire(label):
+            nonlocal fired_label, fired_at
+            fired_label, fired_at = label, time.time()
+            print(f"[GestureControl] {label}", flush=True)
 
         def drop_camera():
             nonlocal cap, read_fails
@@ -200,19 +237,33 @@ class GestureEngine(threading.Thread):
                 if frame_i % PROCESS_EVERY_N:
                     continue
 
+                # Some Windows camera backends open fine but deliver black
+                # frames; after ~5s of darkness switch to the next backend.
+                if IS_WINDOWS and frame.mean() < 5:
+                    dark_frames += 1
+                    if dark_frames >= DARK_FRAME_LIMIT:
+                        self._backend_i += 1
+                        drop_camera()
+                        dark_frames = 0
+                        print("[GestureControl] camera gave only black frames, "
+                              "trying another backend...", flush=True)
+                    continue
+                dark_frames = 0
+
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 result = hands.process(rgb)
                 now = time.time()
 
-                if result.multi_hand_landmarks:
-                    hand = result.multi_hand_landmarks[0]
-                    fingers = count_fingers(hand)
+                hand = result.multi_hand_landmarks[0] if result.multi_hand_landmarks else None
+                fingers = count_fingers(hand) if hand is not None else None
 
+                if hand is not None:
                     if fingers == 1:
                         if hold_start is None:
                             hold_start = now
                         elif now - hold_start >= HOLD_LONG and now - last_action > COOLDOWN:
                             safe(brightness_up)
+                            fire("Brightness up")
                             last_action = now
                             hold_start = None
 
@@ -222,10 +273,13 @@ class GestureEngine(threading.Thread):
                         elif now - hold_start >= HOLD_SHORT and now - last_action > COOLDOWN:
                             if fingers == 2:
                                 safe(pyautogui.hotkey, HOTKEY_MOD, "t")
+                                fire("New tab (Ctrl+T)" if IS_WINDOWS else "New tab (Cmd+T)")
                             elif fingers == 3:
                                 safe(pyautogui.hotkey, HOTKEY_MOD, "n")
+                                fire("New window (Ctrl+N)" if IS_WINDOWS else "New window (Cmd+N)")
                             elif fingers == 5:
                                 safe(pyautogui.press, "space")
+                                fire("Play/pause (Space)")
                             last_action = now
                             hold_start = None
                     else:
@@ -240,6 +294,7 @@ class GestureEngine(threading.Thread):
                             sleep_state = "HOLD_FIST"
                     elif sleep_state == "HOLD_FIST":
                         if fingers == 0 and now - fist_start >= HOLD_SHORT:
+                            fire("Sleep")
                             safe(system_sleep)
                             # On Windows SetSuspendState returns after resume;
                             # reset gestures and reopen the (now stale) camera
@@ -254,16 +309,22 @@ class GestureEngine(threading.Thread):
                             sleep_state = "WAIT_OPEN"
                             fist_start = None
 
+                if self.preview:
+                    action = fired_label if now - fired_at < 2.0 else None
+                    self._show_preview(frame, hand, fingers, hold_start, now, action)
+
                 time.sleep(0.01)
         finally:
             drop_camera()
             hands.close()
+            if self.preview:
+                safe(cv2.destroyAllWindows)
 
 
 # ===============================
 # TRAY / MENU BAR APP
 # ===============================
-def run_windows():
+def run_windows(preview=False):
     import pystray
     from PIL import Image, ImageDraw
 
@@ -277,7 +338,7 @@ def run_windows():
             d.rounded_rectangle([x, 8 + (0 if i in (1, 2) else 4), x + 7, 34], radius=3, fill=color)
         return img
 
-    engine = GestureEngine()
+    engine = GestureEngine(preview=preview)
     engine.start()
 
     state = {"enabled": load_state()}
@@ -339,9 +400,12 @@ def run_mac():
 # ENTRY POINT
 # ===============================
 if __name__ == "__main__":
+    preview = "--preview" in sys.argv or "--debug" in sys.argv
     if IS_WINDOWS:
-        run_windows()
+        run_windows(preview=preview)
     elif IS_MAC:
+        if preview:
+            print("--preview is only supported on Windows; ignoring.", flush=True)
         run_mac()
     else:
         sys.exit("GestureControl supports Windows and macOS only.")
